@@ -1,0 +1,480 @@
+// =====================================================
+// TESIS BLE
+// Script 08: Validación parcial con Sentinel-2 NDWI
+// Autora: Lourdes Ruesjas Aebicher
+// =====================================================
+
+
+// -----------------------------------------------------
+// 1. Área de estudio
+// -----------------------------------------------------
+
+var roi = table;
+
+Map.centerObject(roi, 11);
+
+Map.addLayer(
+  roi,
+  {color: 'orange'},
+  'Área de estudio - BLE'
+);
+
+
+// -----------------------------------------------------
+// 2. Cargar Sentinel-2 Surface Reflectance
+// -----------------------------------------------------
+
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(roi)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 40));
+
+print('Colección Sentinel-2 filtrada:', s2);
+print('Cantidad total Sentinel-2:', s2.size());
+
+
+// -----------------------------------------------------
+// 3. Función para obtener composite mensual Sentinel-2
+// -----------------------------------------------------
+
+function compositeS2Mensual(anio, mes) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var coleccionMensual = s2
+    .filterDate(inicio, fin);
+
+  print('Cantidad Sentinel-2 ' + anio + '-' + mes + ':', coleccionMensual.size());
+
+  var composite = coleccionMensual
+    .median()
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('fecha', inicio.format('YYYY-MM'))
+    .set('cantidad_imagenes', coleccionMensual.size());
+
+  return composite;
+}
+
+
+// -----------------------------------------------------
+// 4. Función NDWI
+// -----------------------------------------------------
+
+function calcularNDWI(imagen) {
+  var ndwi = imagen
+    .normalizedDifference(['B3', 'B8'])
+    .rename('NDWI');
+
+  return ndwi;
+}
+
+
+// -----------------------------------------------------
+// 5. Casos de prueba
+// -----------------------------------------------------
+
+var s2_ene_2019 = compositeS2Mensual(2019, 1);
+var s2_mar_2021 = compositeS2Mensual(2021, 3);
+var s2_jul_2021 = compositeS2Mensual(2021, 7);
+var s2_dic_2021 = compositeS2Mensual(2021, 12);
+
+
+// -----------------------------------------------------
+// 6. Visualización RGB
+// -----------------------------------------------------
+
+var visRGB = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 3000
+};
+
+Map.addLayer(
+  s2_ene_2019,
+  visRGB,
+  'Sentinel-2 RGB enero 2019',
+  false
+);
+
+Map.addLayer(
+  s2_mar_2021,
+  visRGB,
+  'Sentinel-2 RGB marzo 2021',
+  false
+);
+
+Map.addLayer(
+  s2_jul_2021,
+  visRGB,
+  'Sentinel-2 RGB julio 2021',
+  false
+);
+
+Map.addLayer(
+  s2_dic_2021,
+  visRGB,
+  'Sentinel-2 RGB diciembre 2021',
+  false
+);
+
+
+// -----------------------------------------------------
+// 7. Calcular NDWI
+// -----------------------------------------------------
+
+var ndwi_ene_2019 = calcularNDWI(s2_ene_2019);
+var ndwi_mar_2021 = calcularNDWI(s2_mar_2021);
+var ndwi_jul_2021 = calcularNDWI(s2_jul_2021);
+var ndwi_dic_2021 = calcularNDWI(s2_dic_2021);
+
+
+// -----------------------------------------------------
+// 8. Visualizar NDWI
+// -----------------------------------------------------
+
+var visNDWI = {
+  min: -0.5,
+  max: 0.8,
+  palette: ['brown', 'white', 'blue']
+};
+
+Map.addLayer(
+  ndwi_ene_2019,
+  visNDWI,
+  'NDWI enero 2019',
+  false
+);
+
+Map.addLayer(
+  ndwi_mar_2021,
+  visNDWI,
+  'NDWI marzo 2021',
+  false
+);
+
+Map.addLayer(
+  ndwi_jul_2021,
+  visNDWI,
+  'NDWI julio 2021',
+  false
+);
+
+Map.addLayer(
+  ndwi_dic_2021,
+  visNDWI,
+  'NDWI diciembre 2021',
+  false
+);
+
+
+// -----------------------------------------------------
+// 9. Máscara de agua NDWI inicial
+// -----------------------------------------------------
+
+var umbralNDWI = 0;
+
+function mascaraAguaNDWI(ndwi) {
+  return ndwi
+    .gt(umbralNDWI)
+    .selfMask();
+}
+
+var agua_ndwi_ene_2019 = mascaraAguaNDWI(ndwi_ene_2019);
+var agua_ndwi_mar_2021 = mascaraAguaNDWI(ndwi_mar_2021);
+var agua_ndwi_jul_2021 = mascaraAguaNDWI(ndwi_jul_2021);
+var agua_ndwi_dic_2021 = mascaraAguaNDWI(ndwi_dic_2021);
+
+Map.addLayer(
+  agua_ndwi_ene_2019,
+  {palette: ['cyan']},
+  'Agua NDWI enero 2019',
+  false
+);
+
+Map.addLayer(
+  agua_ndwi_mar_2021,
+  {palette: ['cyan']},
+  'Agua NDWI marzo 2021',
+  false
+);
+
+Map.addLayer(
+  agua_ndwi_jul_2021,
+  {palette: ['cyan']},
+  'Agua NDWI julio 2021',
+  false
+);
+
+Map.addLayer(
+  agua_ndwi_dic_2021,
+  {palette: ['cyan']},
+  'Agua NDWI diciembre 2021',
+  false
+);
+
+// =====================================================
+// 10. Comparación Sentinel-1 final vs Sentinel-2 NDWI
+// Meses seleccionados para validación parcial
+// =====================================================
+
+
+// -----------------------------------------------------
+// 10.1 Cargar Sentinel-1 para generar máscaras finales
+// -----------------------------------------------------
+
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .select(['VV', 'VH']);
+
+var umbralVV = -17;
+
+
+// -----------------------------------------------------
+// 10.2 Función para generar composite mensual Sentinel-1
+// -----------------------------------------------------
+
+function compositeS1Mensual(anio, mes) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var coleccionMensual = s1.filterDate(inicio, fin);
+
+  var composite = coleccionMensual
+    .median()
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('cantidad_imagenes', coleccionMensual.size());
+
+  return composite;
+}
+
+
+// -----------------------------------------------------
+// 10.3 Función para máscara final Sentinel-1
+// -----------------------------------------------------
+
+function mascaraAguaS1(anio, mes) {
+  var composite = compositeS1Mensual(anio, mes);
+
+  var agua = composite
+    .select('VV')
+    .lt(umbralVV)
+    .selfMask();
+
+  return agua;
+}
+
+
+// -----------------------------------------------------
+// 10.4 Máscaras Sentinel-1 finales
+// -----------------------------------------------------
+
+var agua_s1_ene_2019 = mascaraAguaS1(2019, 1);
+var agua_s1_mar_2021 = mascaraAguaS1(2021, 3);
+var agua_s1_jul_2021 = mascaraAguaS1(2021, 7);
+
+
+// -----------------------------------------------------
+// 10.5 Visualizar comparación S1 vs NDWI
+// -----------------------------------------------------
+
+// Enero 2019
+Map.addLayer(
+  agua_s1_ene_2019,
+  {palette: ['blue']},
+  'Agua S1 final enero 2019',
+  false
+);
+
+Map.addLayer(
+  agua_ndwi_ene_2019,
+  {palette: ['cyan']},
+  'Agua NDWI enero 2019',
+  false
+);
+
+
+// Marzo 2021
+Map.addLayer(
+  agua_s1_mar_2021,
+  {palette: ['blue']},
+  'Agua S1 final marzo 2021',
+  false
+);
+
+Map.addLayer(
+  agua_ndwi_mar_2021,
+  {palette: ['cyan']},
+  'Agua NDWI marzo 2021',
+  false
+);
+
+
+// Julio 2021
+Map.addLayer(
+  agua_s1_jul_2021,
+  {palette: ['blue']},
+  'Agua S1 final julio 2021',
+  false
+);
+
+Map.addLayer(
+  agua_ndwi_jul_2021,
+  {palette: ['cyan']},
+  'Agua NDWI julio 2021',
+  false
+);
+
+// =====================================================
+// 11. Métricas de comparación S1 vs NDWI
+// Validación parcial
+// =====================================================
+
+// Función para calcular área en hectáreas
+function areaHa(mask) {
+  var area = ee.Image.pixelArea()
+    .updateMask(mask)
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: roi,
+      scale: 10,
+      maxPixels: 1e13,
+      tileScale: 4
+    });
+
+  return ee.Number(area.get('area')).divide(10000);
+}
+
+
+// Función para comparar dos máscaras
+function compararS1NDWI(maskS1, maskNDWI, anio, mes, nombre) {
+
+  // Convertir máscaras a binarias
+  var s1_bin = maskS1.unmask(0).gt(0);
+  var ndwi_bin = maskNDWI.unmask(0).gt(0);
+
+  // Coincidencia: detectado por ambos métodos
+  var coincidencia = s1_bin.and(ndwi_bin).selfMask();
+
+  // Solo Sentinel-1
+  var soloS1 = s1_bin.and(ndwi_bin.not()).selfMask();
+
+  // Solo NDWI
+  var soloNDWI = ndwi_bin.and(s1_bin.not()).selfMask();
+
+  // Áreas
+  var areaS1 = areaHa(s1_bin.selfMask());
+  var areaNDWI = areaHa(ndwi_bin.selfMask());
+  var areaCoincidente = areaHa(coincidencia);
+  var areaSoloS1 = areaHa(soloS1);
+  var areaSoloNDWI = areaHa(soloNDWI);
+
+  var porcentajeCoincidenciaS1 = areaCoincidente
+    .divide(areaS1)
+    .multiply(100);
+
+  // Visualización
+  Map.addLayer(
+    coincidencia,
+    {palette: ['green']},
+    'Coincidencia S1-NDWI ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    soloS1,
+    {palette: ['blue']},
+    'Solo S1 ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    soloNDWI,
+    {palette: ['cyan']},
+    'Solo NDWI ' + nombre,
+    false
+  );
+
+  return ee.Feature(null, {
+    'anio': anio,
+    'mes': mes,
+    'nombre': nombre,
+    'area_S1_ha': areaS1,
+    'area_NDWI_ha': areaNDWI,
+    'area_coincidente_ha': areaCoincidente,
+    'area_solo_S1_ha': areaSoloS1,
+    'area_solo_NDWI_ha': areaSoloNDWI,
+    'porcentaje_coincidencia_respecto_S1': porcentajeCoincidenciaS1
+  });
+}
+
+
+// -----------------------------------------------------
+// 11.1 Comparaciones por mes
+// -----------------------------------------------------
+
+var comp_ene_2019 = compararS1NDWI(
+  agua_s1_ene_2019,
+  agua_ndwi_ene_2019,
+  2019,
+  1,
+  'enero 2019'
+);
+
+var comp_mar_2021 = compararS1NDWI(
+  agua_s1_mar_2021,
+  agua_ndwi_mar_2021,
+  2021,
+  3,
+  'marzo 2021'
+);
+
+var comp_jul_2021 = compararS1NDWI(
+  agua_s1_jul_2021,
+  agua_ndwi_jul_2021,
+  2021,
+  7,
+  'julio 2021'
+);
+
+
+// -----------------------------------------------------
+// 11.2 Tabla final de comparación
+// -----------------------------------------------------
+
+var tabla_validacion = ee.FeatureCollection([
+  comp_ene_2019,
+  comp_mar_2021,
+  comp_jul_2021
+]);
+
+print('Tabla de validación parcial S1 vs NDWI:', tabla_validacion);
+
+
+// -----------------------------------------------------
+// 11.3 Exportar tabla de validación parcial
+// -----------------------------------------------------
+
+Export.table.toDrive({
+  collection: tabla_validacion,
+  description: 'validacion_parcial_S1_vs_NDWI',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'validacion_parcial_S1_vs_NDWI',
+  fileFormat: 'CSV',
+  selectors: [
+    'anio',
+    'mes',
+    'nombre',
+    'area_S1_ha',
+    'area_NDWI_ha',
+    'area_coincidente_ha',
+    'area_solo_S1_ha',
+    'area_solo_NDWI_ha',
+    'porcentaje_coincidencia_respecto_S1'
+  ]
+});
