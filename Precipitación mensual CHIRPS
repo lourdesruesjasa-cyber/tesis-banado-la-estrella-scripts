@@ -1,0 +1,180 @@
+// =====================================================
+// TESIS BLE
+// Script 09: Precipitación mensual CHIRPS
+// Años: 2019 y 2021
+// Autora: Lourdes Ruesjas Aebicher
+// =====================================================
+
+
+// -----------------------------------------------------
+// 1. Área de estudio
+// -----------------------------------------------------
+
+var roi = table;
+
+Map.centerObject(roi, 11);
+
+Map.addLayer(
+  roi,
+  {color: 'orange'},
+  'Área de estudio - BLE'
+);
+
+
+// -----------------------------------------------------
+// 2. Cargar CHIRPS Daily
+// -----------------------------------------------------
+
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterBounds(roi)
+  .select('precipitation');
+
+//print('Colección CHIRPS:', chirps);
+print('Cantidad total CHIRPS:', chirps.size());
+
+
+// -----------------------------------------------------
+// 3. Función para calcular precipitación mensual
+// -----------------------------------------------------
+
+function precipitacionMensual(anio) {
+  var meses = ee.List.sequence(1, 12);
+
+  var tabla = ee.FeatureCollection(
+    meses.map(function(mes) {
+      mes = ee.Number(mes);
+
+      var inicio = ee.Date.fromYMD(anio, mes, 1);
+      var fin = inicio.advance(1, 'month');
+
+      // Suma diaria del mes
+      var lluviaMensual = chirps
+        .filterDate(inicio, fin)
+        .sum()
+        .clip(roi);
+
+      // Promedio espacial dentro del polígono
+      // Resultado: precipitación media acumulada mensual en mm
+      var estadistica = lluviaMensual.reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: roi,
+        scale: 5566,
+        maxPixels: 1e13,
+        tileScale: 4
+      });
+
+      var precipMM = ee.Number(estadistica.get('precipitation'));
+
+      return ee.Feature(null, {
+        'anio': anio,
+        'mes': mes,
+        'fecha': inicio.format('YYYY-MM'),
+        'precipitacion_mm_mes': precipMM
+      });
+    })
+  );
+
+  return tabla;
+}
+
+
+// -----------------------------------------------------
+// 4. Calcular precipitación 2019 y 2021
+// -----------------------------------------------------
+
+var pp_2019 = precipitacionMensual(2019);
+var pp_2021 = precipitacionMensual(2021);
+
+var pp_total = pp_2019.merge(pp_2021);
+
+print('Precipitación mensual CHIRPS 2019:', pp_2019);
+print('Precipitación mensual CHIRPS 2021:', pp_2021);
+print('Precipitación mensual CHIRPS 2019 y 2021:', pp_total);
+
+
+// -----------------------------------------------------
+// 5. Listas de control
+// -----------------------------------------------------
+
+print(
+  'Precipitación CHIRPS 2019 enero-diciembre (mm):',
+  pp_2019.aggregate_array('precipitacion_mm_mes')
+);
+
+print(
+  'Precipitación CHIRPS 2021 enero-diciembre (mm):',
+  pp_2021.aggregate_array('precipitacion_mm_mes')
+);
+
+
+// -----------------------------------------------------
+// 6. Gráfico de precipitación mensual
+// -----------------------------------------------------
+
+var graficoPP = ui.Chart.feature.groups({
+  features: pp_total,
+  xProperty: 'mes',
+  yProperty: 'precipitacion_mm_mes',
+  seriesProperty: 'anio'
+})
+.setChartType('ColumnChart')
+.setOptions({
+  title: 'Precipitación mensual CHIRPS sobre el área de estudio',
+  hAxis: {
+    title: 'Mes'
+  },
+  vAxis: {
+    title: 'Precipitación acumulada mensual (mm)'
+  }
+});
+
+print(graficoPP);
+
+
+// -----------------------------------------------------
+// 7. Visualizar ejemplo de precipitación mensual
+// -----------------------------------------------------
+
+function visualizarPP(anio, mes, nombre) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var lluviaMensual = chirps
+    .filterDate(inicio, fin)
+    .sum()
+    .clip(roi);
+
+  Map.addLayer(
+    lluviaMensual,
+    {
+      min: 0,
+      max: 300,
+      palette: ['white', 'lightblue', 'blue', 'darkblue']
+    },
+    'CHIRPS ' + nombre,
+    false
+  );
+}
+
+visualizarPP(2019, 1, 'enero 2019');
+visualizarPP(2021, 3, 'marzo 2021');
+visualizarPP(2021, 7, 'julio 2021');
+
+
+// -----------------------------------------------------
+// 8. Exportar tabla a Google Drive
+// -----------------------------------------------------
+
+Export.table.toDrive({
+  collection: pp_total,
+  description: 'precipitacion_CHIRPS_mensual_2019_2021',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'precipitacion_CHIRPS_mensual_2019_2021',
+  fileFormat: 'CSV',
+  selectors: [
+    'anio',
+    'fecha',
+    'mes',
+    'precipitacion_mm_mes'
+  ]
+});
