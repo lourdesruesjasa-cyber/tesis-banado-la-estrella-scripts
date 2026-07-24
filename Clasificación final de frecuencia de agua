@@ -1,0 +1,202 @@
+// =====================================================
+// TESIS BLE - Sentinel-1
+// Script 16: Clasificación final de frecuencia de agua
+// Método: Sentinel-1 VH < -24 dB
+// Periodo: 2019-2021
+// =====================================================
+
+
+// -----------------------------------------------------
+// 1. Área de estudio
+// -----------------------------------------------------
+var roi = table;
+Map.centerObject(roi, 11);
+
+Map.addLayer(roi, {color: 'orange'}, 'Área de estudio - BLE');
+
+
+// -----------------------------------------------------
+// 2. Parámetros
+// -----------------------------------------------------
+var umbralVH = -24;
+var escala = 10;
+
+
+// -----------------------------------------------------
+// 3. Cargar Sentinel-1
+// -----------------------------------------------------
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .select(['VV', 'VH']);
+
+
+// -----------------------------------------------------
+// 4. Función composite mensual
+// -----------------------------------------------------
+function compositeMensual(anio, mes) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  return s1
+    .filterDate(inicio, fin)
+    .median()
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('fecha', inicio.format('YYYY-MM'));
+}
+
+
+// -----------------------------------------------------
+// 5. Función máscara mensual de agua VH
+// -----------------------------------------------------
+function mascaraAguaVHMensual(anio, mes) {
+  var comp = compositeMensual(anio, mes);
+
+  return comp.select('VH')
+    .lt(umbralVH)
+    .rename('agua')
+    .unmask(0)
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('fecha', comp.get('fecha'));
+}
+
+
+// -----------------------------------------------------
+// 6. Colección mensual anual
+// -----------------------------------------------------
+function coleccionAguaVHAnual(anio) {
+  var meses = ee.List.sequence(1, 12);
+
+  return ee.ImageCollection(
+    meses.map(function(mes) {
+      return mascaraAguaVHMensual(anio, ee.Number(mes));
+    })
+  );
+}
+
+var agua2019 = coleccionAguaVHAnual(2019);
+var agua2021 = coleccionAguaVHAnual(2021);
+var aguaTotal = agua2019.merge(agua2021);
+
+
+// -----------------------------------------------------
+// 7. Frecuencia total 2019-2021
+// -----------------------------------------------------
+var frecuenciaTotal = aguaTotal
+  .mean()
+  .rename('frecuencia_agua_VH_total')
+  .clip(roi);
+
+Map.addLayer(
+  frecuenciaTotal,
+  {
+    min: 0,
+    max: 1,
+    palette: ['ffffff', 'c7e9b4', '7fcdbb', '41b6c4', '2c7fb8', '253494']
+  },
+  'Frecuencia total VH 2019-2021',
+  false
+);
+
+
+// -----------------------------------------------------
+// 8. Clasificación final
+// -----------------------------------------------------
+// 0 = no agua / sin detección
+// 1 = temporaria 0-25%
+// 2 = recurrente media 25-50%
+// 3 = recurrente alta 50-75%
+// 4 = persistente 75-100%
+
+var clasificacion = ee.Image(0)
+  .where(frecuenciaTotal.gt(0).and(frecuenciaTotal.lte(0.25)), 1)
+  .where(frecuenciaTotal.gt(0.25).and(frecuenciaTotal.lte(0.50)), 2)
+  .where(frecuenciaTotal.gt(0.50).and(frecuenciaTotal.lte(0.75)), 3)
+  .where(frecuenciaTotal.gt(0.75).and(frecuenciaTotal.lte(1.00)), 4)
+  .rename('clasificacion_frecuencia_VH_2019_2021')
+  .clip(roi);
+
+var visClasificacion = {
+  min: 0,
+  max: 4,
+  palette: [
+    'ffffff', // 0 no agua
+    'c6dbef', // 1 temporaria
+    '6baed6', // 2 recurrente media
+    '2171b5', // 3 recurrente alta
+    '08306b'  // 4 persistente
+  ]
+};
+
+Map.addLayer(
+  clasificacion,
+  visClasificacion,
+  'Clasificación frecuencia agua VH 2019-2021'
+);
+
+
+// -----------------------------------------------------
+// 9. Tabla de áreas por clase
+// -----------------------------------------------------
+function areaClase(valorClase, nombreClase) {
+  var mask = clasificacion.eq(valorClase);
+
+  var area = ee.Image.pixelArea()
+    .updateMask(mask)
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: roi,
+      scale: escala,
+      maxPixels: 1e13,
+      tileScale: 4
+    });
+
+  return ee.Feature(null, {
+    codigo_clase: valorClase,
+    clase: nombreClase,
+    area_ha: ee.Number(area.get('area')).divide(10000)
+  });
+}
+
+var tablaClases = ee.FeatureCollection([
+  areaClase(0, 'No agua / sin detección'),
+  areaClase(1, 'Agua temporaria 0-25%'),
+  areaClase(2, 'Agua recurrente media 25-50%'),
+  areaClase(3, 'Agua recurrente alta 50-75%'),
+  areaClase(4, 'Agua persistente 75-100%')
+]);
+
+print('Tabla de áreas por clase - clasificación final VH:', tablaClases);
+
+
+// -----------------------------------------------------
+// 10. Exportar raster final
+// -----------------------------------------------------
+Export.image.toDrive({
+  image: clasificacion,
+  description: 'clasificacion_frecuencia_agua_S1_VH_2019_2021',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'clasificacion_frecuencia_agua_S1_VH_2019_2021',
+  region: roi.geometry(),
+  scale: escala,
+  maxPixels: 1e13
+});
+
+
+// -----------------------------------------------------
+// 11. Exportar tabla final
+// -----------------------------------------------------
+Export.table.toDrive({
+  collection: tablaClases,
+  description: 'tabla_clasificacion_frecuencia_agua_S1_VH_2019_2021',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'tabla_clasificacion_frecuencia_agua_S1_VH_2019_2021',
+  fileFormat: 'CSV',
+  selectors: ['codigo_clase', 'clase', 'area_ha']
+});
