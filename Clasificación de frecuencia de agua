@@ -1,0 +1,240 @@
+// =====================================================
+// TESIS BLE - Sentinel-1
+// Script 11: Clasificación de frecuencia de agua
+// Años: 2019 y 2021
+// Método principal: VV < -17 dB
+// Autora: Lourdes Ruesjas Aebicher
+// =====================================================
+
+
+// -----------------------------------------------------
+// 1. Área de estudio
+// -----------------------------------------------------
+
+var roi = table;
+
+Map.centerObject(roi, 11);
+
+Map.addLayer(
+  roi,
+  {color: 'orange'},
+  'Área de estudio - BLE'
+);
+
+
+// -----------------------------------------------------
+// 2. Parámetros
+// -----------------------------------------------------
+
+var umbralVV = -17;
+var escala = 10;
+
+
+// -----------------------------------------------------
+// 3. Cargar Sentinel-1 GRD
+// -----------------------------------------------------
+
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .select(['VV', 'VH']);
+
+
+// -----------------------------------------------------
+// 4. Composite mensual
+// -----------------------------------------------------
+
+function compositeMensual(anio, mes) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var coleccionMensual = s1.filterDate(inicio, fin);
+
+  var composite = coleccionMensual
+    .median()
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('fecha', inicio.format('YYYY-MM'))
+    .set('cantidad_imagenes', coleccionMensual.size());
+
+  return composite;
+}
+
+
+// -----------------------------------------------------
+// 5. Máscara mensual de agua
+// -----------------------------------------------------
+
+function mascaraAguaMensual(anio, mes) {
+  var composite = compositeMensual(anio, mes);
+
+  var agua = composite
+    .select('VV')
+    .lt(umbralVV)
+    .rename('agua')
+    .unmask(0)
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('fecha', composite.get('fecha'));
+
+  return agua;
+}
+
+
+// -----------------------------------------------------
+// 6. Colección mensual de máscaras
+// -----------------------------------------------------
+
+function coleccionAguaAnual(anio) {
+  var meses = ee.List.sequence(1, 12);
+
+  var coleccion = ee.ImageCollection(
+    meses.map(function(mes) {
+      mes = ee.Number(mes);
+      return mascaraAguaMensual(anio, mes);
+    })
+  );
+
+  return coleccion;
+}
+
+var agua_2019 = coleccionAguaAnual(2019);
+var agua_2021 = coleccionAguaAnual(2021);
+var agua_total = agua_2019.merge(agua_2021);
+
+
+// -----------------------------------------------------
+// 7. Frecuencia total 2019-2021
+// -----------------------------------------------------
+
+var frecuencia_total = agua_total
+  .mean()
+  .rename('frecuencia_agua_2019_2021')
+  .clip(roi);
+
+
+// -----------------------------------------------------
+// 8. Clasificación de frecuencia
+// -----------------------------------------------------
+
+// Clase 0: no agua / nunca detectado
+// Clase 1: baja frecuencia >0 - 25%
+// Clase 2: frecuencia media >25 - 50%
+// Clase 3: alta frecuencia >50 - 75%
+// Clase 4: muy alta frecuencia >75 - 100%
+
+var clasificacion = ee.Image(0)
+  .where(frecuencia_total.gt(0).and(frecuencia_total.lte(0.25)), 1)
+  .where(frecuencia_total.gt(0.25).and(frecuencia_total.lte(0.50)), 2)
+  .where(frecuencia_total.gt(0.50).and(frecuencia_total.lte(0.75)), 3)
+  .where(frecuencia_total.gt(0.75).and(frecuencia_total.lte(1)), 4)
+  .rename('clasificacion_frecuencia')
+  .clip(roi);
+
+
+// -----------------------------------------------------
+// 9. Visualización
+// -----------------------------------------------------
+
+var visClasificacion = {
+  min: 0,
+  max: 4,
+  palette: [
+    'ffffff', // 0 no agua
+    'bde0fe', // 1 baja
+    '48cae4', // 2 media
+    '0077b6', // 3 alta
+    '03045e'  // 4 muy alta
+  ]
+};
+
+Map.addLayer(
+  frecuencia_total,
+  {
+    min: 0,
+    max: 1,
+    palette: ['ffffff', 'c7e9b4', '7fcdbb', '41b6c4', '2c7fb8', '253494']
+  },
+  'Frecuencia total 2019-2021',
+  false
+);
+
+Map.addLayer(
+  clasificacion,
+  visClasificacion,
+  'Clasificación frecuencia de agua 2019-2021'
+);
+
+
+// -----------------------------------------------------
+// 10. Área por clase
+// -----------------------------------------------------
+
+function areaPorClase(valorClase, nombreClase) {
+  var mask = clasificacion.eq(valorClase).selfMask();
+
+  var area = ee.Image.pixelArea()
+    .updateMask(mask)
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: roi,
+      scale: escala,
+      maxPixels: 1e13,
+      tileScale: 4
+    });
+
+  var areaHa = ee.Number(area.get('area')).divide(10000);
+
+  return ee.Feature(null, {
+    'codigo_clase': valorClase,
+    'clase': nombreClase,
+    'area_ha': areaHa
+  });
+}
+
+var tabla_clasificacion = ee.FeatureCollection([
+  areaPorClase(0, 'No agua / sin detección'),
+  areaPorClase(1, 'Agua temporaria 0-25%'),
+  areaPorClase(2, 'Agua recurrente media 25-50%'),
+  areaPorClase(3, 'Agua recurrente alta 50-75%'),
+  areaPorClase(4, 'Agua persistente 75-100%')
+]);
+
+print('Área por clase de frecuencia:', tabla_clasificacion);
+
+
+// -----------------------------------------------------
+// 11. Exportar raster clasificado
+// -----------------------------------------------------
+
+Export.image.toDrive({
+  image: clasificacion,
+  description: 'clasificacion_frecuencia_agua_S1_2019_2021',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'clasificacion_frecuencia_agua_S1_2019_2021',
+  region: roi.geometry(),
+  scale: escala,
+  maxPixels: 1e13
+});
+
+
+// -----------------------------------------------------
+// 12. Exportar tabla de áreas
+// -----------------------------------------------------
+
+Export.table.toDrive({
+  collection: tabla_clasificacion,
+  description: 'area_clasificacion_frecuencia_agua_S1_2019_2021',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'area_clasificacion_frecuencia_agua_S1_2019_2021',
+  fileFormat: 'CSV',
+  selectors: [
+    'codigo_clase',
+    'clase',
+    'area_ha'
+  ]
+});
