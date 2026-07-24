@@ -1,0 +1,312 @@
+// =====================================================
+// TESIS BLE
+// Script 14: Comparación Sentinel-1 VH vs Sentinel-2 NDWI
+// Método S1 principal: VH < -24 dB
+// Autora: Lourdes Ruesjas Aebicher
+// =====================================================
+
+
+// -----------------------------------------------------
+// 1. Área de estudio
+// -----------------------------------------------------
+
+var roi = table;
+
+Map.centerObject(roi, 11);
+
+Map.addLayer(
+  roi,
+  {color: 'orange'},
+  'Área de estudio - BLE'
+);
+
+
+// -----------------------------------------------------
+// 2. Parámetros
+// -----------------------------------------------------
+
+var umbralVH = -24;
+var umbralNDWI = 0.2;
+var escala = 10;
+
+
+// -----------------------------------------------------
+// 3. Sentinel-1 GRD
+// -----------------------------------------------------
+
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .select(['VV', 'VH']);
+
+print('Colección Sentinel-1 filtrada:', s1);
+print('Cantidad total Sentinel-1:', s1.size());
+
+
+// -----------------------------------------------------
+// 4. Sentinel-2 SR Harmonized
+// -----------------------------------------------------
+
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(roi);
+
+print('Colección Sentinel-2 filtrada:', s2);
+print('Cantidad total Sentinel-2:', s2.size());
+
+
+// -----------------------------------------------------
+// 5. Máscara simple de nubes Sentinel-2 usando SCL
+// -----------------------------------------------------
+
+function maskS2clouds(image) {
+  var scl = image.select('SCL');
+
+  var mask = scl.neq(3)   // sombra de nube
+    .and(scl.neq(8))      // nube probabilidad media
+    .and(scl.neq(9))      // nube probabilidad alta
+    .and(scl.neq(10))     // cirrus
+    .and(scl.neq(11));    // nieve/hielo
+
+  return image.updateMask(mask);
+}
+
+
+// -----------------------------------------------------
+// 6. Composite mensual Sentinel-1 VH
+// -----------------------------------------------------
+
+function compositeS1(anio, mes) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var col = s1.filterDate(inicio, fin);
+
+  var img = col
+    .median()
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('fecha', inicio.format('YYYY-MM'))
+    .set('cantidad_S1', col.size());
+
+  return img;
+}
+
+
+// -----------------------------------------------------
+// 7. Máscara S1 VH BINARIA
+// -----------------------------------------------------
+
+function mascaraS1VH(anio, mes) {
+  var img = compositeS1(anio, mes);
+
+  var agua = img
+    .select('VH')
+    .lt(umbralVH)
+    .rename('agua_S1_VH')
+    .unmask(0)
+    .clip(roi);
+
+  return agua;
+}
+
+
+// -----------------------------------------------------
+// 8. Composite mensual Sentinel-2 y NDWI
+// -----------------------------------------------------
+
+function compositeS2NDWI(anio, mes) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var col = s2
+    .filterDate(inicio, fin)
+    .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 40))
+    .map(maskS2clouds);
+
+  var img = col
+    .median()
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('fecha', inicio.format('YYYY-MM'))
+    .set('cantidad_S2', col.size());
+
+  var ndwi = img
+    .normalizedDifference(['B3', 'B8'])
+    .rename('NDWI')
+    .clip(roi);
+
+  return ndwi.set('cantidad_S2', col.size());
+}
+
+
+// -----------------------------------------------------
+// 9. Máscara NDWI BINARIA
+// -----------------------------------------------------
+
+function mascaraNDWI(anio, mes) {
+  var ndwi = compositeS2NDWI(anio, mes);
+
+  var agua = ndwi
+    .gt(umbralNDWI)
+    .rename('agua_NDWI')
+    .unmask(0)
+    .clip(roi);
+
+  return agua;
+}
+
+
+// -----------------------------------------------------
+// 10. Función para calcular área
+// -----------------------------------------------------
+
+function calcularAreaHa(maskBinaria) {
+  var area = ee.Image.pixelArea()
+    .updateMask(maskBinaria.eq(1))
+    .reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: roi,
+      scale: escala,
+      maxPixels: 1e13,
+      tileScale: 4
+    });
+
+  return ee.Number(area.get('area')).divide(10000);
+}
+
+
+// -----------------------------------------------------
+// 11. Comparación S1 VH vs NDWI
+// -----------------------------------------------------
+
+function compararMes(anio, mes, nombre) {
+
+  var s1vh = mascaraS1VH(anio, mes);
+  var ndwi = mascaraNDWI(anio, mes);
+
+  // Ahora sí: máscaras binarias 1/0
+  var coincidencia = s1vh.eq(1).and(ndwi.eq(1)).rename('coincidencia');
+  var soloS1 = s1vh.eq(1).and(ndwi.eq(0)).rename('solo_S1_VH');
+  var soloNDWI = ndwi.eq(1).and(s1vh.eq(0)).rename('solo_NDWI');
+
+  var areaS1 = calcularAreaHa(s1vh);
+  var areaNDWI = calcularAreaHa(ndwi);
+  var areaCoincidente = calcularAreaHa(coincidencia);
+  var areaSoloS1 = calcularAreaHa(soloS1);
+  var areaSoloNDWI = calcularAreaHa(soloNDWI);
+
+  var porcentajeCoincidenciaS1 = areaCoincidente
+    .divide(areaS1)
+    .multiply(100);
+
+  // Sentinel-2 RGB para visualización
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var s2rgb = s2
+    .filterDate(inicio, fin)
+    .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 40))
+    .map(maskS2clouds)
+    .median()
+    .clip(roi);
+
+  Map.addLayer(
+    s2rgb,
+    {bands: ['B4', 'B3', 'B2'], min: 0, max: 3000},
+    'Sentinel-2 RGB ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    s1vh.selfMask(),
+    {palette: ['blue']},
+    'Agua S1 VH final ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    ndwi.selfMask(),
+    {palette: ['cyan']},
+    'Agua NDWI ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    coincidencia.selfMask(),
+    {palette: ['green']},
+    'Coincidencia S1 VH-NDWI ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    soloS1.selfMask(),
+    {palette: ['blue']},
+    'Solo S1 VH ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    soloNDWI.selfMask(),
+    {palette: ['cyan']},
+    'Solo NDWI ' + nombre,
+    false
+  );
+
+  return ee.Feature(null, {
+    'anio': anio,
+    'mes': mes,
+    'nombre': nombre,
+    'area_S1_VH_ha': areaS1,
+    'area_NDWI_ha': areaNDWI,
+    'area_coincidente_ha': areaCoincidente,
+    'area_solo_S1_VH_ha': areaSoloS1,
+    'area_solo_NDWI_ha': areaSoloNDWI,
+    'porcentaje_coincidencia_respecto_S1': porcentajeCoincidenciaS1,
+    'umbral_VH_dB': umbralVH,
+    'umbral_NDWI': umbralNDWI
+  });
+}
+
+
+// -----------------------------------------------------
+// 12. Meses de validación
+// -----------------------------------------------------
+
+var comparacion = ee.FeatureCollection([
+  compararMes(2019, 1, 'enero 2019'),
+  compararMes(2021, 3, 'marzo 2021'),
+  compararMes(2021, 7, 'julio 2021'),
+  compararMes(2021, 12, 'diciembre 2021')
+]);
+
+print('Comparación Sentinel-1 VH vs NDWI:', comparacion);
+
+
+// -----------------------------------------------------
+// 13. Exportar tabla corregida
+// -----------------------------------------------------
+
+Export.table.toDrive({
+  collection: comparacion,
+  description: 'comparacion_S1_VH_NDWI_2019_2021_CORREGIDA',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'comparacion_S1_VH_NDWI_2019_2021_CORREGIDA',
+  fileFormat: 'CSV',
+  selectors: [
+    'anio',
+    'mes',
+    'nombre',
+    'area_S1_VH_ha',
+    'area_NDWI_ha',
+    'area_coincidente_ha',
+    'area_solo_S1_VH_ha',
+    'area_solo_NDWI_ha',
+    'porcentaje_coincidencia_respecto_S1',
+    'umbral_VH_dB',
+    'umbral_NDWI'
+  ]
+});
