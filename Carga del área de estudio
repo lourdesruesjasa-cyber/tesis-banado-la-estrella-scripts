@@ -1,0 +1,277 @@
+// =====================================================
+// TESIS BLE - Sentinel-1
+// Script 01: Carga del área de estudio
+// Autora: Lourdes Ruesjas Aebicher
+// =====================================================
+
+// Área de estudio
+var roi = table;
+
+// Centrar mapa
+Map.centerObject(roi, 11);
+
+// Mostrar polígono
+Map.addLayer(
+  roi,
+  {color: 'orange'},
+  'Área de estudio - BLE'
+);
+
+// Ver información en consola
+print('Área de estudio:', roi);
+
+// =====================================================
+// 5. Cargar colección Sentinel-1 GRD
+// =====================================================
+
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .select(['VV', 'VH']);
+
+print('Colección Sentinel-1 filtrada:', s1);
+print('Cantidad total de imágenes Sentinel-1:', s1.size());
+
+// =====================================================
+// 6. Filtrar años de análisis
+// =====================================================
+
+var s1_2021 = s1.filterDate('2021-01-01', '2022-01-01');
+var s1_2023 = s1.filterDate('2023-01-01', '2024-01-01');
+
+print('Sentinel-1 año 2021:', s1_2021);
+print('Cantidad de imágenes 2021:', s1_2021.size());
+
+print('Sentinel-1 año 2023:', s1_2023);
+print('Cantidad de imágenes 2023:', s1_2023.size());
+
+// =====================================================
+// 7. Visualizar imagen Sentinel-1 de prueba
+// =====================================================
+
+var img_prueba_2021 = ee.Image(s1_2021.first());
+
+print('Primera imagen Sentinel-1 2021:', img_prueba_2021);
+
+Map.addLayer(
+  img_prueba_2021.clip(roi),
+  {bands: ['VV'], min: -25, max: 0},
+  'Sentinel-1 VV - prueba 2021'
+);
+
+Map.addLayer(
+  img_prueba_2021.clip(roi),
+  {bands: ['VH'], min: -30, max: -5},
+  'Sentinel-1 VH - prueba 2021'
+);
+
+// =====================================================
+// 8. Diagnóstico de disponibilidad por año
+// =====================================================
+
+var s1_base = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'));
+
+print('Total Sentinel-1 sin filtro VV/VH:', s1_base.size());
+
+var s1_2020_base = s1_base.filterDate('2020-01-01', '2021-01-01');
+var s1_2021_base = s1_base.filterDate('2021-01-01', '2022-01-01');
+var s1_2022_base = s1_base.filterDate('2022-01-01', '2023-01-01');
+var s1_2023_base = s1_base.filterDate('2023-01-01', '2024-01-01');
+var s1_2024_base = s1_base.filterDate('2024-01-01', '2025-01-01');
+
+print('Cantidad Sentinel-1 2020 sin filtro VV/VH:', s1_2020_base.size());
+print('Cantidad Sentinel-1 2021 sin filtro VV/VH:', s1_2021_base.size());
+print('Cantidad Sentinel-1 2022 sin filtro VV/VH:', s1_2022_base.size());
+print('Cantidad Sentinel-1 2023 sin filtro VV/VH:', s1_2023_base.size());
+print('Cantidad Sentinel-1 2024 sin filtro VV/VH:', s1_2024_base.size());
+
+// =====================================================
+// 9. Diagnóstico por órbita
+// =====================================================
+
+var s1_2021_asc = s1_base
+  .filterDate('2021-01-01', '2022-01-01')
+  .filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+
+var s1_2021_desc = s1_base
+  .filterDate('2021-01-01', '2022-01-01')
+  .filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+
+var s1_2023_asc = s1_base
+  .filterDate('2023-01-01', '2024-01-01')
+  .filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+
+var s1_2023_desc = s1_base
+  .filterDate('2023-01-01', '2024-01-01')
+  .filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+
+print('2021 ASCENDING:', s1_2021_asc.size());
+print('2021 DESCENDING:', s1_2021_desc.size());
+print('2023 ASCENDING:', s1_2023_asc.size());
+print('2023 DESCENDING:', s1_2023_desc.size());
+
+// =====================================================
+// 11. Diagnóstico final: disponibilidad por año completo
+// =====================================================
+
+var s1_todo = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi);
+
+var anios = ee.List.sequence(2015, 2025);
+
+var conteo_anual = ee.FeatureCollection(
+  anios.map(function(anio) {
+    anio = ee.Number(anio);
+    var inicio = ee.Date.fromYMD(anio, 1, 1);
+    var fin = inicio.advance(1, 'year');
+
+    var cantidad = s1_todo
+      .filterDate(inicio, fin)
+      .size();
+
+    return ee.Feature(null, {
+      'anio': anio,
+      'cantidad': cantidad
+    });
+  })
+);
+
+print('Conteo anual Sentinel-1 en el área:', conteo_anual);
+
+// Ver fechas disponibles
+var fechas_disponibles = s1_todo.aggregate_array('system:time_start')
+  .map(function(fecha) {
+    return ee.Date(fecha).format('YYYY-MM-dd');
+  });
+
+print('Fechas disponibles Sentinel-1:', fechas_disponibles);
+
+// =====================================================
+// 14. Conteo mensual Sentinel-1 entre 2015 y 2021
+// =====================================================
+
+function contarMensualPorAnio(anio) {
+  var meses = ee.List.sequence(1, 12);
+
+  return ee.FeatureCollection(
+    meses.map(function(mes) {
+      mes = ee.Number(mes);
+      var inicio = ee.Date.fromYMD(anio, mes, 1);
+      var fin = inicio.advance(1, 'month');
+
+      var cantidad = s1
+        .filterDate(inicio, fin)
+        .size();
+
+      return ee.Feature(null, {
+        'anio': anio,
+        'mes': mes,
+        'cantidad': cantidad
+      });
+    })
+  );
+}
+
+var conteo_2015 = contarMensualPorAnio(2015);
+var conteo_2016 = contarMensualPorAnio(2016);
+var conteo_2017 = contarMensualPorAnio(2017);
+var conteo_2018 = contarMensualPorAnio(2018);
+var conteo_2019 = contarMensualPorAnio(2019);
+var conteo_2020 = contarMensualPorAnio(2020);
+var conteo_2021 = contarMensualPorAnio(2021);
+
+print('Conteo mensual Sentinel-1 2015:', conteo_2015);
+print('Conteo mensual Sentinel-1 2016:', conteo_2016);
+print('Conteo mensual Sentinel-1 2017:', conteo_2017);
+print('Conteo mensual Sentinel-1 2018:', conteo_2018);
+print('Conteo mensual Sentinel-1 2019:', conteo_2019);
+print('Conteo mensual Sentinel-1 2020:', conteo_2020);
+print('Conteo mensual Sentinel-1 2021:', conteo_2021);
+
+// =====================================================
+// Mostrar conteo mensual como tabla en consola
+// =====================================================
+
+function tablaConteoMensual(anio) {
+  var meses = ee.List.sequence(1, 12);
+
+  var tabla = ee.FeatureCollection(
+    meses.map(function(mes) {
+      mes = ee.Number(mes);
+      var inicio = ee.Date.fromYMD(anio, mes, 1);
+      var fin = inicio.advance(1, 'month');
+
+      var cantidad = s1
+        .filterDate(inicio, fin)
+        .size();
+
+      return ee.Feature(null, {
+        'anio': anio,
+        'mes': mes,
+        'cantidad_imagenes': cantidad
+      });
+    })
+  );
+
+  print('Tabla mensual Sentinel-1 ' + anio, tabla);
+}
+
+tablaConteoMensual(2015);
+tablaConteoMensual(2016);
+tablaConteoMensual(2019);
+tablaConteoMensual(2021);
+
+// =====================================================
+// 16. Conteo mensual claro: listas y gráficos
+// =====================================================
+
+function resumenMensual(anio) {
+  var meses = ee.List.sequence(1, 12);
+
+  var tabla = ee.FeatureCollection(
+    meses.map(function(mes) {
+      mes = ee.Number(mes);
+      var inicio = ee.Date.fromYMD(anio, mes, 1);
+      var fin = inicio.advance(1, 'month');
+
+      var cantidad = s1
+        .filterDate(inicio, fin)
+        .size();
+
+      return ee.Feature(null, {
+        'mes': mes,
+        'cantidad': cantidad
+      });
+    })
+  );
+
+  // Lista simple de cantidades
+  print('Cantidad mensual ' + anio + ' enero-diciembre:',
+        tabla.aggregate_array('cantidad'));
+
+  // Gráfico
+  var grafico = ui.Chart.feature.byFeature({
+    features: tabla,
+    xProperty: 'mes',
+    yProperties: ['cantidad']
+  })
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Cantidad mensual Sentinel-1 ' + anio,
+    hAxis: {title: 'Mes'},
+    vAxis: {title: 'Cantidad de imágenes'},
+    legend: {position: 'none'}
+  });
+
+  print(grafico);
+}
+
+resumenMensual(2015);
+resumenMensual(2016);
+resumenMensual(2019);
+resumenMensual(2020);
+resumenMensual(2021);
