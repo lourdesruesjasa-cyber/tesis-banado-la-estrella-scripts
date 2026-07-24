@@ -1,0 +1,328 @@
+// =====================================================
+// TESIS BLE - Sentinel-1
+// Script 15: Mapas de frecuencia de inundación con VH
+// Años: 2019 y 2021
+// Método principal: VH < -24 dB
+// Autora: Lourdes Ruesjas Aebicher
+// =====================================================
+
+
+// -----------------------------------------------------
+// 1. Área de estudio
+// -----------------------------------------------------
+
+var roi = table;
+
+Map.centerObject(roi, 11);
+
+Map.addLayer(
+  roi,
+  {color: 'orange'},
+  'Área de estudio - BLE'
+);
+
+
+// -----------------------------------------------------
+// 2. Parámetros
+// -----------------------------------------------------
+
+var umbralVH = -24;
+var escala = 10;
+
+
+// -----------------------------------------------------
+// 3. Cargar Sentinel-1 GRD
+// -----------------------------------------------------
+
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .select(['VV', 'VH']);
+
+print('Colección Sentinel-1 filtrada:', s1);
+print('Cantidad total de imágenes Sentinel-1:', s1.size());
+
+
+// -----------------------------------------------------
+// 4. Composite mensual VH
+// -----------------------------------------------------
+
+function compositeMensual(anio, mes) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var coleccionMensual = s1.filterDate(inicio, fin);
+
+  var composite = coleccionMensual
+    .median()
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('fecha', inicio.format('YYYY-MM'))
+    .set('cantidad_imagenes', coleccionMensual.size());
+
+  return composite;
+}
+
+
+// -----------------------------------------------------
+// 5. Máscara mensual de agua VH
+// -----------------------------------------------------
+
+function mascaraAguaVHMensual(anio, mes) {
+  var composite = compositeMensual(anio, mes);
+
+  var agua = composite
+    .select('VH')
+    .lt(umbralVH)
+    .rename('agua')
+    .unmask(0)
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('fecha', composite.get('fecha'))
+    .set('cantidad_imagenes', composite.get('cantidad_imagenes'));
+
+  return agua;
+}
+
+
+// -----------------------------------------------------
+// 6. Colección mensual de máscaras por año
+// -----------------------------------------------------
+
+function coleccionAguaVHAnual(anio) {
+  var meses = ee.List.sequence(1, 12);
+
+  var coleccion = ee.ImageCollection(
+    meses.map(function(mes) {
+      mes = ee.Number(mes);
+      return mascaraAguaVHMensual(anio, mes);
+    })
+  );
+
+  return coleccion;
+}
+
+var agua_vh_2019 = coleccionAguaVHAnual(2019);
+var agua_vh_2021 = coleccionAguaVHAnual(2021);
+var agua_vh_total = agua_vh_2019.merge(agua_vh_2021);
+
+print('Máscaras mensuales VH 2019:', agua_vh_2019);
+print('Máscaras mensuales VH 2021:', agua_vh_2021);
+print('Máscaras mensuales VH total 2019-2021:', agua_vh_total);
+
+
+// -----------------------------------------------------
+// 7. Frecuencia de agua VH
+// -----------------------------------------------------
+
+// Frecuencia = promedio de máscaras binarias.
+// Valor 0 = nunca fue agua.
+// Valor 1 = agua en todos los meses.
+
+var frecuencia_vh_2019 = agua_vh_2019
+  .mean()
+  .rename('frecuencia_agua_VH_2019')
+  .clip(roi);
+
+var frecuencia_vh_2021 = agua_vh_2021
+  .mean()
+  .rename('frecuencia_agua_VH_2021')
+  .clip(roi);
+
+var frecuencia_vh_total = agua_vh_total
+  .mean()
+  .rename('frecuencia_agua_VH_2019_2021')
+  .clip(roi);
+
+var diferencia_vh_2021_2019 = frecuencia_vh_2021
+  .subtract(frecuencia_vh_2019)
+  .rename('diferencia_frecuencia_VH_2021_2019')
+  .clip(roi);
+
+
+// -----------------------------------------------------
+// 8. Visualización
+// -----------------------------------------------------
+
+var visFrecuencia = {
+  min: 0,
+  max: 1,
+  palette: [
+    'ffffff',
+    'c7e9b4',
+    '7fcdbb',
+    '41b6c4',
+    '2c7fb8',
+    '253494'
+  ]
+};
+
+var visDiferencia = {
+  min: -1,
+  max: 1,
+  palette: [
+    '8c510a',
+    'd8b365',
+    'f6e8c3',
+    'ffffff',
+    'c7eae5',
+    '5ab4ac',
+    '01665e'
+  ]
+};
+
+Map.addLayer(
+  frecuencia_vh_2019,
+  visFrecuencia,
+  'Frecuencia agua VH 2019'
+);
+
+Map.addLayer(
+  frecuencia_vh_2021,
+  visFrecuencia,
+  'Frecuencia agua VH 2021',
+  false
+);
+
+Map.addLayer(
+  frecuencia_vh_total,
+  visFrecuencia,
+  'Frecuencia agua VH total 2019-2021',
+  false
+);
+
+Map.addLayer(
+  diferencia_vh_2021_2019,
+  visDiferencia,
+  'Diferencia frecuencia VH 2021 - 2019',
+  false
+);
+
+
+// -----------------------------------------------------
+// 9. Área por clases de frecuencia
+// -----------------------------------------------------
+
+function areaClaseFrecuencia(imagenFrecuencia, nombre) {
+
+  var baja = imagenFrecuencia.gt(0).and(imagenFrecuencia.lte(0.25)).selfMask();
+  var media = imagenFrecuencia.gt(0.25).and(imagenFrecuencia.lte(0.50)).selfMask();
+  var alta = imagenFrecuencia.gt(0.50).and(imagenFrecuencia.lte(0.75)).selfMask();
+  var muyAlta = imagenFrecuencia.gt(0.75).and(imagenFrecuencia.lte(1)).selfMask();
+
+  function calcularArea(mask) {
+    var area = ee.Image.pixelArea()
+      .updateMask(mask)
+      .reduceRegion({
+        reducer: ee.Reducer.sum(),
+        geometry: roi,
+        scale: escala,
+        maxPixels: 1e13,
+        tileScale: 4
+      });
+
+    return ee.Number(area.get('area')).divide(10000);
+  }
+
+  var tabla = ee.FeatureCollection([
+    ee.Feature(null, {
+      'producto': nombre,
+      'clase': 'Baja frecuencia 0-25%',
+      'area_ha': calcularArea(baja)
+    }),
+    ee.Feature(null, {
+      'producto': nombre,
+      'clase': 'Frecuencia media 25-50%',
+      'area_ha': calcularArea(media)
+    }),
+    ee.Feature(null, {
+      'producto': nombre,
+      'clase': 'Alta frecuencia 50-75%',
+      'area_ha': calcularArea(alta)
+    }),
+    ee.Feature(null, {
+      'producto': nombre,
+      'clase': 'Muy alta frecuencia 75-100%',
+      'area_ha': calcularArea(muyAlta)
+    })
+  ]);
+
+  return tabla;
+}
+
+var clases_vh_2019 = areaClaseFrecuencia(frecuencia_vh_2019, 'VH 2019');
+var clases_vh_2021 = areaClaseFrecuencia(frecuencia_vh_2021, 'VH 2021');
+var clases_vh_total = areaClaseFrecuencia(frecuencia_vh_total, 'VH 2019-2021');
+
+var tabla_clases_vh = clases_vh_2019
+  .merge(clases_vh_2021)
+  .merge(clases_vh_total);
+
+print('Área por clases de frecuencia VH:', tabla_clases_vh);
+
+
+// -----------------------------------------------------
+// 10. Exportar rasters a Google Drive
+// -----------------------------------------------------
+
+Export.image.toDrive({
+  image: frecuencia_vh_2019,
+  description: 'frecuencia_agua_S1_VH_2019',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'frecuencia_agua_S1_VH_2019',
+  region: roi.geometry(),
+  scale: escala,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: frecuencia_vh_2021,
+  description: 'frecuencia_agua_S1_VH_2021',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'frecuencia_agua_S1_VH_2021',
+  region: roi.geometry(),
+  scale: escala,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: frecuencia_vh_total,
+  description: 'frecuencia_agua_S1_VH_2019_2021',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'frecuencia_agua_S1_VH_2019_2021',
+  region: roi.geometry(),
+  scale: escala,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: diferencia_vh_2021_2019,
+  description: 'diferencia_frecuencia_agua_S1_VH_2021_menos_2019',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'diferencia_frecuencia_agua_S1_VH_2021_menos_2019',
+  region: roi.geometry(),
+  scale: escala,
+  maxPixels: 1e13
+});
+
+
+// -----------------------------------------------------
+// 11. Exportar tabla de clases
+// -----------------------------------------------------
+
+Export.table.toDrive({
+  collection: tabla_clases_vh,
+  description: 'area_clases_frecuencia_agua_S1_VH_2019_2021',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'area_clases_frecuencia_agua_S1_VH_2019_2021',
+  fileFormat: 'CSV',
+  selectors: [
+    'producto',
+    'clase',
+    'area_ha'
+  ]
+});
