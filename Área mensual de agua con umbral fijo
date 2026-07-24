@@ -1,0 +1,201 @@
+// =====================================================
+// TESIS BLE - Sentinel-1
+// Script 04: Área mensual de agua con umbral fijo
+// Autora: Lourdes Ruesjas Aebicher
+// =====================================================
+
+// -----------------------------------------------------
+// 1. Área de estudio
+// -----------------------------------------------------
+
+var roi = table;
+
+Map.centerObject(roi, 11);
+
+Map.addLayer(
+  roi,
+  {color: 'orange'},
+  'Área de estudio - BLE'
+);
+
+// -----------------------------------------------------
+// 2. Cargar Sentinel-1 GRD
+// -----------------------------------------------------
+
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .select(['VV', 'VH']);
+
+// -----------------------------------------------------
+// 3. Parámetro de umbral inicial
+// -----------------------------------------------------
+
+var umbralVV = -17;
+
+// -----------------------------------------------------
+// 4. Función para calcular área mensual de agua
+// -----------------------------------------------------
+
+function calcularAreaMensual(anio) {
+  var meses = ee.List.sequence(1, 12);
+
+  var tabla = ee.FeatureCollection(
+    meses.map(function(mes) {
+      mes = ee.Number(mes);
+
+      var inicio = ee.Date.fromYMD(anio, mes, 1);
+      var fin = inicio.advance(1, 'month');
+
+      var coleccionMensual = s1.filterDate(inicio, fin);
+
+      var composite = coleccionMensual
+        .median()
+        .clip(roi);
+
+      var agua = composite
+        .select('VV')
+        .lt(umbralVV)
+        .selfMask();
+
+      var areaAgua = ee.Image.pixelArea()
+        .updateMask(agua)
+        .reduceRegion({
+          reducer: ee.Reducer.sum(),
+          geometry: roi,
+          scale: 10,
+          maxPixels: 1e13
+        });
+
+      var areaHa = ee.Number(areaAgua.get('area')).divide(10000);
+
+      return ee.Feature(null, {
+        'anio': anio,
+        'mes': mes,
+        'fecha': inicio.format('YYYY-MM'),
+        'cantidad_imagenes': coleccionMensual.size(),
+        'umbral_VV_dB': umbralVV,
+        'area_agua_ha': areaHa
+      });
+    })
+  );
+
+  return tabla;
+}
+
+// -----------------------------------------------------
+// 5. Calcular áreas mensuales para 2019 y 2021
+// -----------------------------------------------------
+
+var area_2019 = calcularAreaMensual(2019);
+var area_2021 = calcularAreaMensual(2021);
+
+print('Área mensual de agua 2019 - umbral VV < -17 dB:', area_2019);
+print('Área mensual de agua 2021 - umbral VV < -17 dB:', area_2021);
+
+// -----------------------------------------------------
+// 6. Unir ambas tablas
+// -----------------------------------------------------
+
+var area_total = area_2019.merge(area_2021);
+
+print('Área mensual de agua 2019 y 2021:', area_total);
+
+// -----------------------------------------------------
+// 7. Gráfico de área mensual
+// -----------------------------------------------------
+
+var grafico = ui.Chart.feature.groups({
+  features: area_total,
+  xProperty: 'mes',
+  yProperty: 'area_agua_ha',
+  seriesProperty: 'anio'
+})
+.setChartType('LineChart')
+.setOptions({
+  title: 'Área mensual de agua detectada con Sentinel-1 VV',
+  hAxis: {
+    title: 'Mes'
+  },
+  vAxis: {
+    title: 'Área de agua (ha)'
+  },
+  lineWidth: 2,
+  pointSize: 5
+});
+
+print(grafico);
+
+// -----------------------------------------------------
+// 8. Visualizar ejemplo de máscaras
+// -----------------------------------------------------
+
+function visualizarMascara(anio, mes, nombre) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var composite = s1
+    .filterDate(inicio, fin)
+    .median()
+    .clip(roi);
+
+  var agua = composite
+    .select('VV')
+    .lt(umbralVV)
+    .selfMask();
+
+  Map.addLayer(
+    composite.select('VV'),
+    {min: -25, max: 0},
+    'VV ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    agua,
+    {palette: ['blue']},
+    'Agua ' + nombre + ' VV < -17 dB',
+    false
+  );
+}
+
+visualizarMascara(2019, 1, 'enero 2019');
+visualizarMascara(2021, 1, 'enero 2021');
+
+// =====================================================
+// 9. Mostrar resultados como listas claras
+// =====================================================
+
+print(
+  'Áreas 2019 enero-diciembre (ha):',
+  area_2019.aggregate_array('area_agua_ha')
+);
+
+print(
+  'Áreas 2021 enero-diciembre (ha):',
+  area_2021.aggregate_array('area_agua_ha')
+);
+
+print(
+  'Cantidad de imágenes 2019 enero-diciembre:',
+  area_2019.aggregate_array('cantidad_imagenes')
+);
+
+print(
+  'Cantidad de imágenes 2021 enero-diciembre:',
+  area_2021.aggregate_array('cantidad_imagenes')
+);
+
+// =====================================================
+// 11. Exportar tabla de áreas mensuales a Google Drive
+// =====================================================
+
+Export.table.toDrive({
+  collection: area_total,
+  description: 'area_mensual_agua_S1_umbral_fijo_2019_2021',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'area_mensual_agua_S1_umbral_fijo_2019_2021',
+  fileFormat: 'CSV'
+});
