@@ -1,0 +1,157 @@
+// ======================================================
+// 17_DEM_Copernicus_GLO30_topografia_BLE
+// DEM Copernicus GLO-30 para caracterización topográfica
+// del área de estudio - Bañado La Estrella
+// ======================================================
+
+// 1. Área de estudio
+var area = ee.FeatureCollection('projects/tesis-banado-la-estrella/assets/area_estudio_BLE');
+var geom = area.geometry();
+
+Map.centerObject(area, 11);
+Map.addLayer(area, {color: 'red'}, 'Área de estudio');
+
+// 2. Cargar Copernicus DEM GLO-30
+var demCollection = ee.ImageCollection('COPERNICUS/DEM/GLO30');
+
+// El DEM está como ImageCollection. Se mosaica y se recorta al área.
+var dem = demCollection
+  .select('DEM')
+  .mosaic()
+  .clip(geom);
+
+// 3. Derivar pendiente y hillshade
+// Para evitar problemas de cálculo, se reproyecta el DEM a UTM 21S
+// antes de derivar pendiente y sombreado.
+
+var demMetric = dem.reproject({
+  crs: 'EPSG:32721',
+  scale: 30
+});
+
+var terrain = ee.Terrain.products(demMetric);
+
+var slope = terrain.select('slope')
+  .rename('slope')
+  .clip(geom);
+
+var aspect = terrain.select('aspect')
+  .rename('aspect')
+  .clip(geom);
+
+var hillshade = terrain.select('hillshade')
+  .rename('hillshade')
+  .clip(geom);
+
+// 4. Visualización
+var demVis = {
+  min: 70,
+  max: 95,
+  palette: ['1a9850', '91cf60', 'd9ef8b', 'fee08b', 'fc8d59', 'd73027']
+};
+
+var slopeVis = {
+  min: 0,
+  max: 1.5,
+  palette: ['ffffff', 'd9f0a3', 'addd8e', '78c679', '238443']
+};
+
+var hillshadeVis = {
+  min: 0,
+  max: 255,
+  palette: ['000000', 'ffffff']
+};
+
+Map.addLayer(hillshade, hillshadeVis, 'Hillshade Copernicus GLO-30', false);
+Map.addLayer(dem, demVis, 'DEM Copernicus GLO-30');
+Map.addLayer(slope, slopeVis, 'Pendiente grados');
+Map.addLayer(area.style({color: 'black', fillColor: '00000000', width: 2}), {}, 'Límite área estudio');
+
+// 5. Estadísticos de elevación
+var elevStats = dem.reduceRegion({
+  reducer: ee.Reducer.min()
+    .combine(ee.Reducer.max(), '', true)
+    .combine(ee.Reducer.mean(), '', true)
+    .combine(ee.Reducer.stdDev(), '', true),
+  geometry: geom,
+  scale: 30,
+  crs: 'EPSG:32721',
+  maxPixels: 1e13
+});
+
+print('Estadísticos de elevación DEM Copernicus GLO-30:', elevStats);
+
+// 6. Estadísticos de pendiente
+var slopeStats = slope.reduceRegion({
+  reducer: ee.Reducer.min()
+    .combine(ee.Reducer.max(), '', true)
+    .combine(ee.Reducer.mean(), '', true)
+    .combine(ee.Reducer.stdDev(), '', true),
+  geometry: geom,
+  scale: 30,
+  crs: 'EPSG:32721',
+  maxPixels: 1e13
+});
+
+print('Estadísticos de pendiente:', slopeStats);
+
+// 7. Crear tabla de estadísticos para exportar
+var statsFeature = ee.Feature(null, {
+  elev_min_m: elevStats.get('DEM_min'),
+  elev_max_m: elevStats.get('DEM_max'),
+  elev_mean_m: elevStats.get('DEM_mean'),
+  elev_stdDev_m: elevStats.get('DEM_stdDev'),
+  slope_min_deg: slopeStats.get('slope_min'),
+  slope_max_deg: slopeStats.get('slope_max'),
+  slope_mean_deg: slopeStats.get('slope_mean'),
+  slope_stdDev_deg: slopeStats.get('slope_stdDev')
+});
+
+var statsTable = ee.FeatureCollection([statsFeature]);
+
+print('Tabla estadísticos topográficos:', statsTable);
+
+// 8. Exportar DEM
+Export.image.toDrive({
+  image: dem,
+  description: 'DEM_Copernicus_GLO30_BLE',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'DEM_Copernicus_GLO30_BLE',
+  region: geom,
+  scale: 30,
+  crs: 'EPSG:32721',
+  maxPixels: 1e13
+});
+
+// 9. Exportar pendiente
+Export.image.toDrive({
+  image: slope,
+  description: 'Pendiente_Copernicus_GLO30_BLE',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'Pendiente_Copernicus_GLO30_BLE',
+  region: geom,
+  scale: 30,
+  crs: 'EPSG:32721',
+  maxPixels: 1e13
+});
+
+// 10. Exportar hillshade
+Export.image.toDrive({
+  image: hillshade,
+  description: 'Hillshade_Copernicus_GLO30_BLE',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'Hillshade_Copernicus_GLO30_BLE',
+  region: geom,
+  scale: 30,
+  crs: 'EPSG:32721',
+  maxPixels: 1e13
+});
+
+// 11. Exportar tabla de estadísticos
+Export.table.toDrive({
+  collection: statsTable,
+  description: 'Tabla_estadisticos_topograficos_BLE',
+  folder: 'GEE_TESIS_BLE',
+  fileNamePrefix: 'Tabla_estadisticos_topograficos_BLE',
+  fileFormat: 'CSV'
+});
