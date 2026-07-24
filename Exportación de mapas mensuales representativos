@@ -1,0 +1,189 @@
+// =====================================================
+// TESIS BLE - Sentinel-1
+// Script 18: Exportación de mapas mensuales representativos
+// Producto: Máscaras mensuales de agua S1 VH < -24 dB
+// Años: 2019 y 2021
+// Autora: Lourdes María Ruesjas Aebicher
+// =====================================================
+
+
+// -----------------------------------------------------
+// 1. Área de estudio
+// -----------------------------------------------------
+
+var roi = table;
+
+Map.centerObject(roi, 11);
+
+Map.addLayer(
+  roi,
+  {color: 'orange'},
+  'Área de estudio - BLE'
+);
+
+
+// -----------------------------------------------------
+// 2. Parámetros generales
+// -----------------------------------------------------
+
+var umbralVH = -24;
+var escala = 10;
+var carpetaDrive = 'GEE_TESIS_BLE';
+
+
+// -----------------------------------------------------
+// 3. Cargar colección Sentinel-1 GRD
+// -----------------------------------------------------
+
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .select(['VV', 'VH']);
+
+print('Colección Sentinel-1 filtrada:', s1);
+print('Cantidad total de imágenes:', s1.size());
+
+
+// -----------------------------------------------------
+// 4. Función para generar composite mensual
+// -----------------------------------------------------
+
+function compositeMensual(anio, mes) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var coleccionMensual = s1.filterDate(inicio, fin);
+
+  print(
+    'Cantidad de imágenes ' + anio + '-' + mes + ':',
+    coleccionMensual.size()
+  );
+
+  var composite = coleccionMensual
+    .median()
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('fecha', inicio.format('YYYY-MM'))
+    .set('cantidad_imagenes', coleccionMensual.size());
+
+  return composite;
+}
+
+
+// -----------------------------------------------------
+// 5. Función para generar máscara mensual de agua VH
+// -----------------------------------------------------
+
+function mascaraAguaVH(anio, mes) {
+  var composite = compositeMensual(anio, mes);
+
+  var agua = composite
+    .select('VH')
+    .lt(umbralVH)
+    .selfMask()
+    .rename('agua_VH');
+
+  return agua;
+}
+
+
+// -----------------------------------------------------
+// 6. Función para visualizar mes representativo
+// -----------------------------------------------------
+
+function visualizarMes(anio, mes, nombre) {
+  var composite = compositeMensual(anio, mes);
+
+  var agua = composite
+    .select('VH')
+    .lt(umbralVH)
+    .selfMask()
+    .rename('agua_VH');
+
+  Map.addLayer(
+    composite.select('VH'),
+    {min: -30, max: -5},
+    'VH mensual - ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    agua,
+    {palette: ['0057D9']},
+    'Agua VH < -24 dB - ' + nombre,
+    true
+  );
+}
+
+
+// -----------------------------------------------------
+// 7. Visualización de meses seleccionados
+// -----------------------------------------------------
+
+visualizarMes(2019, 1, 'Enero 2019');
+visualizarMes(2021, 3, 'Marzo 2021');
+visualizarMes(2021, 7, 'Julio 2021');
+visualizarMes(2021, 12, 'Diciembre 2021');
+
+
+// -----------------------------------------------------
+// 8. Función para exportar máscara mensual
+// -----------------------------------------------------
+
+function exportarMapaMensualVH(anio, mes, nombreArchivo) {
+  var agua = mascaraAguaVH(anio, mes);
+
+  Export.image.toDrive({
+    image: agua,
+    description: nombreArchivo,
+    folder: carpetaDrive,
+    fileNamePrefix: nombreArchivo,
+    region: roi.geometry(),
+    scale: escala,
+    crs: 'EPSG:32721',
+    maxPixels: 1e13
+  });
+}
+
+
+// -----------------------------------------------------
+// 9. Exportaciones seleccionadas
+// -----------------------------------------------------
+
+exportarMapaMensualVH(
+  2019,
+  1,
+  'agua_mensual_VH_2019_01_enero'
+);
+
+exportarMapaMensualVH(
+  2021,
+  3,
+  'agua_mensual_VH_2021_03_marzo'
+);
+
+exportarMapaMensualVH(
+  2021,
+  7,
+  'agua_mensual_VH_2021_07_julio'
+);
+
+exportarMapaMensualVH(
+  2021,
+  12,
+  'agua_mensual_VH_2021_12_diciembre'
+);
+
+
+// -----------------------------------------------------
+// 10. Nota metodológica
+// -----------------------------------------------------
+
+print(
+  'Mapas mensuales representativos exportados con umbral VH <',
+  umbralVH,
+  'dB'
+);
