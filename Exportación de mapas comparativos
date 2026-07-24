@@ -1,0 +1,268 @@
+// =====================================================
+// TESIS BLE - Sentinel-1
+// Script 06: Exportación de mapas comparativos
+// Umbral fijo vs Otsu
+// Autora: Lourdes Ruesjas Aebicher
+// =====================================================
+
+
+// -----------------------------------------------------
+// 1. Área de estudio
+// -----------------------------------------------------
+
+var roi = table;
+
+Map.centerObject(roi, 11);
+
+Map.addLayer(
+  roi,
+  {color: 'orange'},
+  'Área de estudio - BLE'
+);
+
+
+// -----------------------------------------------------
+// 2. Cargar colección Sentinel-1 GRD
+// -----------------------------------------------------
+
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterBounds(roi)
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .select(['VV', 'VH']);
+
+
+// -----------------------------------------------------
+// 3. Función Otsu estable
+// -----------------------------------------------------
+
+function otsu(histogram) {
+  histogram = ee.Dictionary(histogram);
+
+  var counts = ee.Array(histogram.get('histogram'));
+  var means = ee.Array(histogram.get('bucketMeans'));
+
+  var size = means.length().get([0]);
+  var total = counts.reduce(ee.Reducer.sum(), [0]).get([0]);
+
+  var sum = means.multiply(counts)
+    .reduce(ee.Reducer.sum(), [0])
+    .get([0]);
+
+  var meanTotal = sum.divide(total);
+
+  var indices = ee.List.sequence(1, size.subtract(1));
+
+  var resultados = indices.map(function(i) {
+    i = ee.Number(i);
+
+    var countsA = counts.slice(0, 0, i);
+    var meansA = means.slice(0, 0, i);
+
+    var weightA = countsA.reduce(ee.Reducer.sum(), [0]).get([0]);
+
+    var sumA = meansA.multiply(countsA)
+      .reduce(ee.Reducer.sum(), [0])
+      .get([0]);
+
+    var meanA = sumA.divide(weightA);
+
+    var weightB = total.subtract(weightA);
+    var meanB = sum.subtract(sumA).divide(weightB);
+
+    var bss = weightA
+      .multiply(meanA.subtract(meanTotal).pow(2))
+      .add(
+        weightB.multiply(meanB.subtract(meanTotal).pow(2))
+      );
+
+    var threshold = means.get([i]);
+
+    return ee.Feature(null, {
+      'threshold': threshold,
+      'bss': bss
+    });
+  });
+
+  var resultadosFC = ee.FeatureCollection(resultados);
+
+  var mejor = resultadosFC
+    .sort('bss', false)
+    .first();
+
+  return ee.Number(mejor.get('threshold'));
+}
+
+
+// -----------------------------------------------------
+// 4. Función para generar composite mensual
+// -----------------------------------------------------
+
+function compositeMensual(anio, mes) {
+  var inicio = ee.Date.fromYMD(anio, mes, 1);
+  var fin = inicio.advance(1, 'month');
+
+  var coleccionMensual = s1.filterDate(inicio, fin);
+
+  var composite = coleccionMensual
+    .median()
+    .clip(roi)
+    .set('anio', anio)
+    .set('mes', mes)
+    .set('cantidad_imagenes', coleccionMensual.size());
+
+  return composite;
+}
+
+
+// -----------------------------------------------------
+// 5. Función para calcular máscara Otsu
+// -----------------------------------------------------
+
+function mascaraOtsu(composite) {
+  var vv = composite.select('VV');
+
+  var histograma = vv.reduceRegion({
+    reducer: ee.Reducer.histogram({
+      maxBuckets: 128,
+      minBucketWidth: 0.1
+    }),
+    geometry: roi,
+    scale: 10,
+    maxPixels: 1e13,
+    bestEffort: true,
+    tileScale: 4
+  });
+
+  var histVV = ee.Dictionary(histograma.get('VV'));
+  var umbral = otsu(histVV);
+
+  var agua = vv
+    .lt(umbral)
+    .selfMask();
+
+  return agua.set('umbral_otsu', umbral);
+}
+
+
+// -----------------------------------------------------
+// 6. Función para preparar y visualizar caso
+// -----------------------------------------------------
+
+var umbralFijo = -17;
+
+function prepararCaso(anio, mes, nombre) {
+  var composite = compositeMensual(anio, mes);
+  var vv = composite.select('VV');
+
+  var aguaFijo = vv
+    .lt(umbralFijo)
+    .selfMask();
+
+  var aguaOtsu = mascaraOtsu(composite);
+
+  Map.addLayer(
+    vv,
+    {min: -25, max: 0},
+    'VV ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    aguaFijo,
+    {palette: ['blue']},
+    'Agua umbral fijo ' + nombre,
+    false
+  );
+
+  Map.addLayer(
+    aguaOtsu,
+    {palette: ['cyan']},
+    'Agua Otsu ' + nombre,
+    false
+  );
+
+  print('Caso ' + nombre);
+  print('Cantidad de imágenes:', composite.get('cantidad_imagenes'));
+  print('Umbral fijo VV:', umbralFijo);
+  print('Umbral Otsu:', aguaOtsu.get('umbral_otsu'));
+
+  return {
+    composite: composite,
+    vv: vv,
+    aguaFijo: aguaFijo,
+    aguaOtsu: aguaOtsu
+  };
+}
+
+
+// -----------------------------------------------------
+// 7. Casos de análisis
+// -----------------------------------------------------
+
+var caso_ene_2019 = prepararCaso(2019, 1, 'enero 2019');
+var caso_mar_2021 = prepararCaso(2021, 3, 'marzo 2021');
+var caso_jul_2021 = prepararCaso(2021, 7, 'julio 2021');
+var caso_dic_2021 = prepararCaso(2021, 12, 'diciembre 2021');
+
+
+// -----------------------------------------------------
+// 8. Exportar GeoTIFF de máscaras comparativas
+// -----------------------------------------------------
+
+function exportarMascara(imagen, nombreArchivo) {
+  Export.image.toDrive({
+    image: imagen,
+    description: nombreArchivo,
+    folder: 'GEE_TESIS_BLE',
+    fileNamePrefix: nombreArchivo,
+    region: roi.geometry(),
+    scale: 10,
+    maxPixels: 1e13
+  });
+}
+
+// Enero 2019
+exportarMascara(
+  caso_ene_2019.aguaFijo,
+  'agua_umbral_fijo_enero_2019'
+);
+
+exportarMascara(
+  caso_ene_2019.aguaOtsu,
+  'agua_otsu_enero_2019'
+);
+
+// Marzo 2021
+exportarMascara(
+  caso_mar_2021.aguaFijo,
+  'agua_umbral_fijo_marzo_2021'
+);
+
+exportarMascara(
+  caso_mar_2021.aguaOtsu,
+  'agua_otsu_marzo_2021'
+);
+
+// Julio 2021
+exportarMascara(
+  caso_jul_2021.aguaFijo,
+  'agua_umbral_fijo_julio_2021'
+);
+
+exportarMascara(
+  caso_jul_2021.aguaOtsu,
+  'agua_otsu_julio_2021'
+);
+
+// Diciembre 2021
+exportarMascara(
+  caso_dic_2021.aguaFijo,
+  'agua_umbral_fijo_diciembre_2021'
+);
+
+exportarMascara(
+  caso_dic_2021.aguaOtsu,
+  'agua_otsu_diciembre_2021'
+);
